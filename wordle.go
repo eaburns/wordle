@@ -64,10 +64,8 @@ func main() {
 	suggest(words)
 	scanner := bufio.NewScanner(os.Stdin)
 	for {
-		if !scanner.Scan() {
-			break
-		}
-		if scanner.Text() == "" {
+		fmt.Printf("> ")
+		if !scanner.Scan() || scanner.Text() == "quit" {
 			break
 		}
 		c := inputConstraints(scanner.Text())
@@ -76,6 +74,7 @@ func main() {
 			fmt.Println("	- means wrong letter; doesn't appear in the word")
 			fmt.Println("	+ means correct letter")
 			fmt.Println("	~ means letter appears in the word in a different position")
+			fmt.Println("Or enter 'quit' to quit.")
 			continue
 		}
 		words = filter(c, words)
@@ -262,7 +261,8 @@ func suggest(words []word) {
 
 	// Print the top 10 words in decreasing order of expected set size.
 	for _, ws := range top {
-		fmt.Printf("freq: %-8d score: %-5d exp: %-5.2f: %s\n", ws.freq, ws.score, ws.exp, ws.word)
+		fmt.Printf("%-8s (exp: %-8.2f freq: %-8d score: %-5d)\n",
+			ws.word, ws.exp, ws.freq, ws.score)
 	}
 	fmt.Printf("%d candidates\n", len(words))
 }
