@@ -13,14 +13,29 @@ import (
 	"strings"
 )
 
-// wordListPath is the path to a word list file.
+// wordListPath is a path to the word list.
+// This is just a list of words. It is used for filtering;
+// the suggestions will only be words choosen from this list.
+const wordListPath = "/usr/share/dict/words"
+
+// freqListPath is the path to a word list file with frequencies.
 // The format is each line has two space separated fields:
 // the first field is the word, and the second field is the frequency
 // of the word in whatever corpus.
 //
+// The frequency list is joined with the word list at wordListPath
+// to find the word frequencies from whatever corpus
+// for use in tie-breaking.
+// The idea is that the frequency list can be very large,
+// containing lots of probably niche words,
+// but the word list itself will be small with mostly common words.
+//
+// Specifically, wordListPath will probably point to the OS dictionary file,
+// and freqListPath will be a big frequency list over something like Wikipedia.
+//
 // The word list that I am using is the Wikipedia word/frequency list from
 // https://github.com/IlyaSemenov/wikipedia-word-frequency/blob/master/results/enwiki-20190320-words-frequency.txt
-const wordListPath = "./freq.txt"
+const freqListPath = "./freq.txt"
 
 // minFrequency is the minimum allowed frequency for the initial candidate list.
 // Words must appearing in the input word list with a lower frequency
@@ -32,7 +47,7 @@ const wordListPath = "./freq.txt"
 // and it will reduce the number of rare, unlikely suggestions.
 // However it will also increase the chance that the targe word
 // is not among the suggestions at all.
-const minFrequency = 1000
+const minFrequency = 300
 
 // nExpectedNextSetSize is number of candidates for which
 // to compute the full expected next set size.
@@ -90,19 +105,38 @@ type word struct {
 }
 
 func initialCandidates() []word {
+	dict := make(map[string]bool)
 	data, err := ioutil.ReadFile(wordListPath)
+	if err != nil {
+		fmt.Printf("failed to read word list file: %s", err)
+		os.Exit(1)
+	}
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	for scanner.Scan() {
+		w := scanner.Text()
+		if len(w) != 5 || strings.IndexFunc(w, func(r rune) bool {
+			return r < 'a' || r > 'z'
+		}) >= 0 {
+			continue
+		}
+		dict[w] = true
+	}
+	if err := scanner.Err(); err != nil {
+		fmt.Printf("error reading word list file: %s", err)
+		os.Exit(1)
+	}
+
+	data, err = ioutil.ReadFile(freqListPath)
 	if err != nil {
 		fmt.Printf("failed to read frequency file: %s", err)
 		os.Exit(1)
 	}
-	words := make([]word, 0, 4096)
-	scanner := bufio.NewScanner(bytes.NewReader(data))
+	words := make([]word, 0, len(dict))
+	scanner = bufio.NewScanner(bytes.NewReader(data))
 	for scanner.Scan() {
 		fields := strings.Fields(scanner.Text())
 		w := fields[0]
-		if len(w) != 5 || strings.IndexFunc(w, func(r rune) bool {
-			return r < 'a' || r > 'z'
-		}) >= 0 {
+		if len(w) != 5 || !dict[w] {
 			continue
 		}
 		freq, err := strconv.Atoi(fields[1])
