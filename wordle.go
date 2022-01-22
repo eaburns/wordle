@@ -7,78 +7,62 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
-	"runtime/pprof"
 	"sort"
 	"strconv"
 	"strings"
 )
 
-// wordListPath is a path to the word list.
-// This is just a list of words. It is used for filtering;
-// the suggestions will only be words choosen from this list.
-const wordListPath = "/usr/share/dict/words"
+// freqListPath is the path to a list of word-frequency pairs,
+// one pair per-line, separated by space.
+const freqListPath = "./freq2.txt"
 
-// freqListPath is the path to a word list file with frequencies.
-// The format is each line has two space separated fields:
-// the first field is the word, and the second field is the frequency
-// of the word in whatever corpus.
-//
-// The frequency list is joined with the word list at wordListPath
-// to find the word frequencies from whatever corpus
-// for use in tie-breaking.
-// The idea is that the frequency list can be very large,
-// containing lots of probably niche words,
-// but the word list itself will be small with mostly common words.
-//
-// Specifically, wordListPath will probably point to the OS dictionary file,
-// and freqListPath will be a big frequency list over something like Wikipedia.
-//
-// The word list that I am using is the Wikipedia word/frequency list from
-// https://github.com/IlyaSemenov/wikipedia-word-frequency/blob/master/results/enwiki-20190320-words-frequency.txt
-const freqListPath = "./freq.txt"
+// smallSetSize is the size threshold to consider a candidate set size small.
+// For small candidate sets, compute expected next-set size for all words.
+const smallSetSize = 500
 
-// minFrequency is the minimum allowed frequency for the initial candidate list.
-// Words must appearing in the input word list with a lower frequency
-// are immediately eliminated from consideration.
-//
-// Increasing minFrequency will reduce the initial word candidate pool size,
-// leaving only more common words.
-// This will make the inital suggestion time faster,
-// and it will reduce the number of rare, unlikely suggestions.
-// However it will also increase the chance that the targe word
-// is not among the suggestions at all.
-const minFrequency = 300
+// topSetSize is number of candidates for which
+// to compute the full expected next-set size
+// if the total candidate list is larger than smallSetSize.
+const topSetSize = 20
 
-// nExpectedNextSetSize is number of candidates for which
-// to compute the full expected next set size.
-// Candidates are first ordered by a heuristic score
-// based on letter frequency. We then compute the full
-// expected next set size for the top nExpectedNextSetSize
-// of the candidates to show for the suggestions at each step.
-const nExpectedNextSetSize = 20
-
-var cpuprofile = flag.String("cpuprofile", "", "write cpu profile to `file`")
+var answer = flag.String("answer", "", "simulates play to find the specified answer")
+var verbose = flag.Bool("v", false, "verbose printing when simulating play")
+var guess0 = flag.String("guess0", "", "first guess to try when simulating play")
 
 func main() {
 	flag.Parse()
-	if *cpuprofile != "" {
-		f, err := os.Create(*cpuprofile)
-		if err != nil {
-			fmt.Printf("could not create CPU profile: ", err)
-			os.Exit(1)
-		}
-		defer f.Close() // error handling omitted for example
-		if err := pprof.StartCPUProfile(f); err != nil {
-			fmt.Printf("could not start CPU profile: ", err)
-			os.Exit(1)
-		}
-		defer pprof.StopCPUProfile()
-	}
 
 	words := initialCandidates()
-	suggest(words)
+
+	if *answer != "" {
+		c := newConstraints()
+		n := 0
+		for len(words) > 1 {
+			var guess string
+			if n == 0 && *guess0 != "" {
+				// The first call to sortWords is very slow,
+				// allow specifying the hard-coded guess
+				// from the command-line to speed up.
+				guess = *guess0
+			} else {
+				sortWords(words)
+				guess = words[len(words)-1].word
+			}
+			if *verbose {
+				fmt.Printf("guess: %s\n", guess)
+			}
+			clearConstraints(c)
+			applyDiffConstraint(c, guess, *answer)
+			words = filter(c, words)
+			n++
+		}
+		fmt.Printf("%d guesses\n", n)
+		return
+	}
+
 	scanner := bufio.NewScanner(os.Stdin)
-	for {
+	suggest(words)
+	for len(words) > 1 {
 		fmt.Printf("> ")
 		if !scanner.Scan() || scanner.Text() == "quit" {
 			break
@@ -89,7 +73,8 @@ func main() {
 			fmt.Println("	- means wrong letter; doesn't appear in the word")
 			fmt.Println("	+ means correct letter")
 			fmt.Println("	~ means letter appears in the word in a different position")
-			fmt.Println("Or enter 'quit' to quit.")
+			fmt.Println("'quit' to quit.")
+			fmt.Println("'?' to see suggested words.")
 			continue
 		}
 		words = filter(c, words)
@@ -105,47 +90,25 @@ type word struct {
 }
 
 func initialCandidates() []word {
-	dict := make(map[string]bool)
-	data, err := ioutil.ReadFile(wordListPath)
-	if err != nil {
-		fmt.Printf("failed to read word list file: %s", err)
-		os.Exit(1)
-	}
-	scanner := bufio.NewScanner(bytes.NewReader(data))
-	for scanner.Scan() {
-		w := scanner.Text()
-		if len(w) != 5 || strings.IndexFunc(w, func(r rune) bool {
-			return r < 'a' || r > 'z'
-		}) >= 0 {
-			continue
-		}
-		dict[w] = true
-	}
-	if err := scanner.Err(); err != nil {
-		fmt.Printf("error reading word list file: %s", err)
-		os.Exit(1)
-	}
-
-	data, err = ioutil.ReadFile(freqListPath)
+	data, err := ioutil.ReadFile(freqListPath)
 	if err != nil {
 		fmt.Printf("failed to read frequency file: %s", err)
 		os.Exit(1)
 	}
-	words := make([]word, 0, len(dict))
-	scanner = bufio.NewScanner(bytes.NewReader(data))
+	words := make([]word, 0, 4096)
+	scanner := bufio.NewScanner(bytes.NewReader(data))
 	for scanner.Scan() {
 		fields := strings.Fields(scanner.Text())
 		w := fields[0]
-		if len(w) != 5 || !dict[w] {
+		if len(w) != 5 || strings.IndexFunc(w, func(r rune) bool {
+			return r < 'a' || r > 'z'
+		}) >= 0 {
 			continue
 		}
 		freq, err := strconv.Atoi(fields[1])
 		if err != nil {
 			fmt.Printf("failed to parse word frequency: %s", err)
 			os.Exit(1)
-		}
-		if freq < minFrequency {
-			continue
 		}
 		words = append(words, word{word: w, freq: freq})
 	}
@@ -249,9 +212,24 @@ func satisfies(c *constraints, word string) bool {
 	return true
 }
 
-// suggest suggests 10 words from the candidate set, words,
+// suggest suggests  words from the candidate set, words,
 // printing the most preferred choice last.
 func suggest(words []word) {
+	sortWords(words)
+	n := 20
+	if n >= len(words) {
+		n = len(words)
+	}
+	for _, ws := range words[len(words)-n : len(words)] {
+		fmt.Printf("%-8s (exp: %-8.2f freq: %-8d score: %-5d)\n",
+			ws.word, ws.exp, ws.freq, ws.score)
+	}
+	fmt.Printf("%d candidates\n", len(words))
+}
+
+// sortWords sorts the words in increasing order or preference.
+// The last word is the most preferred.
+func sortWords(words []word) {
 	posFreq := letterFreqByPosition(words)
 	posScore := letterScoreByPosition(posFreq)
 
@@ -263,19 +241,18 @@ func suggest(words []word) {
 		scorei := words[i].score
 		scorej := words[j].score
 		if scorei == scorej {
-			return words[i].freq > words[j].freq
+			return words[i].freq < words[j].freq
 		}
-		return scorei > scorej
+		return scorei < scorej
 	})
 
-	// Computed expected next set size for the top N words by score.
-	// We do top N here by score, because this computation is O(n^2)
-	// in the number of candidates words.
-	n := nExpectedNextSetSize
-	if len(words) < n {
-		n = len(words)
+	// If the candidate set is not small, only compute next-set size
+	// for the topSetSize words by score.
+	n := len(words)
+	if n > smallSetSize && topSetSize < n {
+		n = topSetSize
 	}
-	top := words[0:n]
+	top := words[len(words)-n : len(words)]
 	for i := range top {
 		top[i].exp = expectedNextSetSize(words, top[i].word)
 	}
@@ -292,13 +269,6 @@ func suggest(words []word) {
 		}
 		return expi > expj
 	})
-
-	// Print the top 10 words in decreasing order of expected set size.
-	for _, ws := range top {
-		fmt.Printf("%-8s (exp: %-8.2f freq: %-8d score: %-5d)\n",
-			ws.word, ws.exp, ws.freq, ws.score)
-	}
-	fmt.Printf("%d candidates\n", len(words))
 }
 
 // Computes the frequency of each letter in each position.
