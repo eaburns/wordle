@@ -37,7 +37,8 @@ func main() {
 	if *answer != "" {
 		c := newConstraints()
 		n := 0
-		for len(words) > 1 {
+		pass := false
+		for len(words) > 0 {
 			var guess string
 			if n == 0 && *guess0 != "" {
 				// The first call to sortWords is very slow,
@@ -51,10 +52,22 @@ func main() {
 			if *verbose {
 				fmt.Printf("guess: %s\n", guess)
 			}
+			n++
+			if guess == *answer {
+				pass = true
+				break
+			}
 			clearConstraints(c)
 			applyDiffConstraint(c, guess, *answer)
+			if *verbose {
+				fmt.Printf("%s\n", c)
+			}
 			words = filter(c, words)
-			n++
+		}
+		if pass {
+			fmt.Printf("passed in ")
+		} else {
+			fmt.Printf("failed in ")
 		}
 		fmt.Printf("%d guesses\n", n)
 		return
@@ -68,13 +81,15 @@ func main() {
 			break
 		}
 		c := inputConstraints(scanner.Text())
+		if *verbose {
+			fmt.Printf("%s\n", c)
+		}
 		if c == nil {
 			fmt.Println("Enter 5 fields of the form XY where X is -, +, or ~ and Y is a letter a-z.")
 			fmt.Println("	- means wrong letter; doesn't appear in the word")
 			fmt.Println("	+ means correct letter")
 			fmt.Println("	~ means letter appears in the word in a different position")
 			fmt.Println("'quit' to quit.")
-			fmt.Println("'?' to see suggested words.")
 			continue
 		}
 		words = filter(c, words)
@@ -121,24 +136,35 @@ func initialCandidates() []word {
 
 type constraints struct {
 	position    [5]byte
-	notPosition [5][]byte
+	notPosition [5][26]bool
 	contains    []byte
-	notContains []byte
 }
 
 func newConstraints() *constraints {
 	return &constraints{
-		position: [5]byte{},
-		notPosition: [5][]byte{
-			[]byte{},
-			[]byte{},
-			[]byte{},
-			[]byte{},
-			[]byte{},
-		},
+		position:    [5]byte{},
+		notPosition: [5][26]bool{[26]bool{}, [26]bool{}, [26]bool{}, [26]bool{}, [26]bool{}},
 		contains:    nil,
-		notContains: nil,
 	}
+}
+
+func (c *constraints) String() string {
+	var s strings.Builder
+	for i := 0; i < 5; i++ {
+		if c.position[i] != 0 {
+			fmt.Fprintf(&s, "+%c ", c.position[i])
+		}
+		for j, not := range c.notPosition[i] {
+			if not {
+				fmt.Fprintf(&s, "-%c ", j+'a')
+			}
+		}
+		fmt.Fprintf(&s, "\n")
+	}
+	for _, c := range c.contains {
+		fmt.Fprintf(&s, "%c ", c)
+	}
+	return s.String()
 }
 
 // inputConstraints returns constraints based on the user input line.
@@ -158,17 +184,25 @@ func inputConstraints(line string) *constraints {
 			return nil
 		}
 	}
+	// First go through + and ~ ops; we can only understand - after knowing the + positions.
 	for i, field := range fields {
-		op := field[0]
-		b := field[1]
-		switch op {
-		case '-':
-			c.notContains = append(c.notContains, b)
+		switch field[0] {
 		case '+':
-			c.position[i] = b
+			c.position[i] = field[1]
 		case '~':
-			c.notPosition[i] = append(c.notPosition[i], b)
-			c.contains = append(c.contains, b)
+			c.notPosition[i][field[1]-'a'] = true
+			c.contains = append(c.contains, field[1])
+		}
+	}
+	// Now that we know the + ops, go through and figure out the - ops.
+	for _, field := range fields {
+		if field[0] != '-' {
+			continue
+		}
+		for i := 0; i < 5; i++ {
+			if c.position[i] == 0 {
+				c.notPosition[i][field[1]-'a'] = true
+			}
 		}
 	}
 	return c
@@ -190,22 +224,25 @@ func filter(c *constraints, words []word) []word {
 func satisfies(c *constraints, word string) bool {
 	for i := 0; i < 5; i++ {
 		got := word[i]
-		if want := c.position[i]; want != 0 && got != want {
-			return false
-		}
-		for _, b := range c.notPosition[i] {
-			if got == b {
+		if want := c.position[i]; want != 0 {
+			if got != want {
+				return false
+			}
+		} else {
+			if c.notPosition[i][got-'a'] {
 				return false
 			}
 		}
 	}
 	for _, b := range c.contains {
-		if word[0] != b && word[1] != b && word[2] != b && word[3] != b && word[4] != b {
-			return false
+		found := false
+		for i := 0; i < 5; i++ {
+			if c.position[i] == 0 && word[i] == b {
+				found = true
+				break
+			}
 		}
-	}
-	for _, b := range c.notContains {
-		if word[0] == b || word[1] == b || word[2] == b || word[3] == b || word[4] == b {
+		if !found {
 			return false
 		}
 	}
@@ -346,25 +383,44 @@ func clearConstraints(c *constraints) {
 		c.position[i] = 0
 	}
 	for i := range c.notPosition {
-		c.notPosition[i] = c.notPosition[i][:0]
+		for j := range c.notPosition[i] {
+			c.notPosition[i][j] = false
+		}
 	}
 	c.contains = c.contains[:0]
-	c.notContains = c.notContains[:0]
 }
 
 // applyDiffConstraint adds constraints to c assuming we guessed guess
 // but the answer was actually answer.
 func applyDiffConstraint(c *constraints, guess string, answer string) {
+	// First set the + constraints, because - and ~ depend on knowing the + values.
 	for i := 0; i < 5; i++ {
 		if guess[i] == answer[i] {
 			c.position[i] = guess[i]
+		}
+	}
+	for i := 0; i < 5; i++ {
+		if c.position[i] != 0 {
 			continue
 		}
-		c.notPosition[i] = append(c.notPosition[i], guess[i])
-		if !strings.ContainsRune(answer, rune(guess[i])) {
-			c.notContains = append(c.notContains, guess[i])
-		} else {
+		found := false
+		for j := 0; j < 5; j++ {
+			if c.position[j] != 0 {
+				continue
+			}
+			if answer[j] == guess[i] {
+				found = true
+			}
+		}
+		if found {
+			c.notPosition[i][guess[i]-'a'] = true
 			c.contains = append(c.contains, guess[i])
+		} else {
+			for j := 0; j < 5; j++ {
+				if c.position[j] == 0 {
+					c.notPosition[j][guess[i]-'a'] = true
+				}
+			}
 		}
 	}
 }
