@@ -14,7 +14,7 @@ import (
 
 // freqListPath is the path to a list of word-frequency pairs,
 // one pair per-line, separated by space.
-const freqListPath = "./freq2.txt"
+const freqListPath = "./freq2_filtered_dedup.txt"
 
 // smallSetSize is the size threshold to consider a candidate set size small.
 // For small candidate sets, compute expected next-set size for all words.
